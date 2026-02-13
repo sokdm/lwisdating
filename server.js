@@ -778,48 +778,49 @@ renderCards();
 app.post("/like/:id", requireLogin, async (req, res) => {
 
   const me = await User.findById(req.session.userId);
-  const likedUser = await User.findById(req.params.id);
+  const likedUser = await User.findById(req.params.id);                                                   
+  if (!likedUser) return res.json({ match: false }); 
 
-  if (!likedUser) return res.json({ match: false });
-
-  me.likes = me.likes || [];
+  me.likes = me.likes || [];                           
   likedUser.likes = likedUser.likes || [];
   me.matches = me.matches || [];
   likedUser.matches = likedUser.matches || [];
-  me.chatUsers = me.chatUsers || [];
+  me.chatUsers = me.chatUsers || [];                   
   likedUser.chatUsers = likedUser.chatUsers || [];
   likedUser.notifications = likedUser.notifications || [];
 
   // Prevent duplicate likes
   if (!me.likes.some(id => id.toString() === likedUser._id.toString())) {
-    me.likes.push(likedUser._id);
+    me.likes.push(likedUser._id);                        
     await me.save();
   }
 
   // 🔔 Add LIKE notification for the liked user
-  likedUser.notifications.push({
+  likedUser.notifications.push({                         
     type: "like",
     text: `${me.name} liked you!`,
     link: "/discover",
     date: new Date(),
-    read: false
+    read: false                                        
   });
-  await likedUser.save();
+
+  await likedUser.save();                            
 
   // 🔔 LIVE LIKE NOTIFICATION
   const targetSocketId = onlineUsers.get(likedUser._id.toString());
-  if (targetSocketId) {
+  if (targetSocketId) {                                  
     io.to(targetSocketId).emit("liked", {
       fromId: me._id,
       fromName: me.name
     });
-  }
+  }                                                  
 
   // 🔥 CHECK FOR MUTUAL MATCH
   const isMatch = likedUser.likes.some(id => id.toString() === me._id.toString());
 
   if (isMatch) {
-    // Add each other to matches array (so message dashboard shows them)
+
+    // Add each other to matches array
     if (!me.matches.some(id => id.toString() === likedUser._id.toString())) {
       me.matches.push(likedUser._id);
     }
@@ -827,13 +828,38 @@ app.post("/like/:id", requireLogin, async (req, res) => {
       likedUser.matches.push(me._id);
     }
 
-    // Also add to chat users for dashboard
+    // Also add to chat users
     if (!me.chatUsers.some(id => id.toString() === likedUser._id.toString())) {
       me.chatUsers.push(likedUser._id);
     }
     if (!likedUser.chatUsers.some(id => id.toString() === me._id.toString())) {
       likedUser.chatUsers.push(me._id);
     }
+
+    /* ================= AUTO FOLLOW ADDED ================= */
+
+    me.following = me.following || [];
+    likedUser.following = likedUser.following || [];
+    me.followers = me.followers || [];
+    likedUser.followers = likedUser.followers || [];
+
+    if (!me.following.some(id => id.toString() === likedUser._id.toString())) {
+      me.following.push(likedUser._id);
+    }
+
+    if (!likedUser.following.some(id => id.toString() === me._id.toString())) {
+      likedUser.following.push(me._id);
+    }
+
+    if (!me.followers.some(id => id.toString() === likedUser._id.toString())) {
+      me.followers.push(likedUser._id);
+    }
+
+    if (!likedUser.followers.some(id => id.toString() === me._id.toString())) {
+      likedUser.followers.push(me._id);
+    }
+
+    /* ==================================================== */
 
     await me.save();
     await likedUser.save();
@@ -842,7 +868,7 @@ app.post("/like/:id", requireLogin, async (req, res) => {
     const mySocketId = onlineUsers.get(me._id.toString());
 
     if (mySocketId) {
-      io.to(mySocketId).emit("match", {
+      io.to(mySocketId).emit("match", {                      
         userId: likedUser._id,
         name: likedUser.name,
         photo: likedUser.photo
@@ -857,10 +883,10 @@ app.post("/like/:id", requireLogin, async (req, res) => {
       });
     }
 
-    return res.json({ match: true });
+    return res.json({ match: true });                  
   }
 
-  res.json({ match: false });
+  res.json({ match: false });                        
 });
 
 /* ================= MESSAGES DASHBOARD ================= */
