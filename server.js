@@ -540,6 +540,7 @@ app.get("/discover", requireLogin, async (req, res) => {
   res.send(basePage("Discover", `
 
 <style>
+/* ================= STYLES ================= */
 body{
   margin:0;
   font-family:Arial;
@@ -658,13 +659,27 @@ body{
   <button onclick="closeMatch()">Keep Swiping</button>
 </div>
 
+<script src="/socket.io/socket.io.js"></script>
 <script>
+const socket = io();
 const users = ${JSON.stringify(availableUsers)};
 const meId = "${me._id}";
 let currentIndex = 0;
 let startX = 0;
 
 const wrapper = document.getElementById("discoverWrapper");
+
+// Register user for notifications
+socket.emit("register", meId);
+
+socket.on("liked", (data) => {
+  console.log("Someone liked you:", data.fromName);
+  // Optional: show toast or small alert
+});
+
+socket.on("match", (user) => {
+  showMatch(user);
+});
 
 function renderCards(){
   wrapper.innerHTML = "";
@@ -729,17 +744,11 @@ function forceLike(){
 
 function likeAction(user){
   fetch("/like/" + user._id, { method:"POST" })
-  .then(res => res.text())
-  .then(() => {
-    checkMatch(user);
-  });
-}
-
-function checkMatch(user){
-  fetch("/profile/" + user._id)
-  .then(()=> {
-    // We don’t auto show match.
-    // Match popup will only show if server emits it.
+  .then(res => res.json())
+  .then(data => {
+    if(data.match){
+      showMatch(user);
+    }
     nextCard();
   });
 }
@@ -751,7 +760,8 @@ function showMatch(user){
 }
 
 function goToChat(){
-  window.location="/chat/"+users[currentIndex-1]._id;
+  const matchedUser = users[currentIndex-1];
+  if(matchedUser) window.location="/chat/"+matchedUser._id;
 }
 
 function closeMatch(){
@@ -764,8 +774,100 @@ renderCards();
 `, true));
 });
 
+/* ================= LIKE ROUTE ================= */
+app.post("/like/:id", requireLogin, async (req, res) => {
+
+  const me = await User.findById(req.session.userId);
+  const likedUser = await User.findById(req.params.id);
+
+  if (!likedUser) return res.json({ match: false });
+
+  me.likes = me.likes || [];
+  likedUser.likes = likedUser.likes || [];
+  me.matches = me.matches || [];
+  likedUser.matches = likedUser.matches || [];
+  me.chatUsers = me.chatUsers || [];
+  likedUser.chatUsers = likedUser.chatUsers || [];
+  likedUser.notifications = likedUser.notifications || [];
+
+  // Prevent duplicate likes
+  if (!me.likes.some(id => id.toString() === likedUser._id.toString())) {
+    me.likes.push(likedUser._id);
+    await me.save();
+  }
+
+  // 🔔 Add LIKE notification for the liked user
+  likedUser.notifications.push({
+    type: "like",
+    text: `${me.name} liked you!`,
+    link: "/discover",
+    date: new Date(),
+    read: false
+  });
+  await likedUser.save();
+
+  // 🔔 LIVE LIKE NOTIFICATION
+  const targetSocketId = onlineUsers.get(likedUser._id.toString());
+  if (targetSocketId) {
+    io.to(targetSocketId).emit("liked", {
+      fromId: me._id,
+      fromName: me.name
+    });
+  }
+
+  // 🔥 CHECK FOR MUTUAL MATCH
+  const isMatch = likedUser.likes.some(id => id.toString() === me._id.toString());
+
+  if (isMatch) {
+    // Add each other to matches array (so message dashboard shows them)
+    if (!me.matches.some(id => id.toString() === likedUser._id.toString())) {
+      me.matches.push(likedUser._id);
+    }
+    if (!likedUser.matches.some(id => id.toString() === me._id.toString())) {
+      likedUser.matches.push(me._id);
+    }
+
+    // Also add to chat users for dashboard
+    if (!me.chatUsers.some(id => id.toString() === likedUser._id.toString())) {
+      me.chatUsers.push(likedUser._id);
+    }
+    if (!likedUser.chatUsers.some(id => id.toString() === me._id.toString())) {
+      likedUser.chatUsers.push(me._id);
+    }
+
+    await me.save();
+    await likedUser.save();
+
+    // Emit match to both users
+    const mySocketId = onlineUsers.get(me._id.toString());
+
+    if (mySocketId) {
+      io.to(mySocketId).emit("match", {
+        userId: likedUser._id,
+        name: likedUser.name,
+        photo: likedUser.photo
+      });
+    }
+
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("match", {
+        userId: me._id,
+        name: me.name,
+        photo: me.photo
+      });
+    }
+
+    return res.json({ match: true });
+  }
+
+  res.json({ match: false });
+});
+
 /* ================= MESSAGES DASHBOARD ================= */
 app.get("/messages", requireLogin, async (req, res) => {
+  const me = await User.findById(req.session.userId);
+
+  // Get existing conversations
   const convos = await Conversation.find({
     participants: req.session.userId
   })
@@ -773,32 +875,47 @@ app.get("/messages", requireLogin, async (req, res) => {
     .populate("lastMessage")
     .sort({ updatedAt: -1 });
 
+  // Include matched users that don't have a conversation yet
+  const matchedUsersWithoutConvo = [];
+  if (me.chatUsers && me.chatUsers.length > 0) {
+    for (let uId of me.chatUsers) {
+      const hasConvo = convos.some(c =>
+        c.participants.some(p => p._id.toString() === uId.toString())
+      );
+      if (!hasConvo) {
+        const u = await User.findById(uId);
+        if (u) matchedUsersWithoutConvo.push(u);
+      }
+    }
+  }
+
   res.send(
     basePage(
       "Messages",
-      `
-<div style="padding:20px">
+      `<div style="padding:20px">
   <h2 style="color:white;margin-bottom:15px">Chats</h2>
 
   ${
-    convos.length === 0
+    convos.length === 0 && matchedUsersWithoutConvo.length === 0
       ? `<p style="color:white">No conversations yet</p>`
-      : convos
-          .map(c => {
-            const other = c.participants.find(
-              p => p._id.toString() !== req.session.userId.toString()
-            );
+      : ""
+  }
 
-            if (!other) return "";
+  ${
+    convos
+      .map(c => {
+        const other = c.participants.find(
+          p => p._id.toString() !== req.session.userId.toString()
+        );
+        if (!other) return "";
 
-            const lastText = c.lastMessage
-              ? c.lastMessage.text.includes("<img")
-                ? "📷 Image"
-                : c.lastMessage.text
-              : "No messages yet";
+        const lastText = c.lastMessage
+          ? c.lastMessage.text.includes("<img")
+            ? "📷 Image"
+            : c.lastMessage.text
+          : "No messages yet";
 
-            return `
-<a href="/chat/${other._id}" style="
+        return `<a href="/chat/${other._id}" style="
   display:flex;
   align-items:center;
   background:white;
@@ -825,13 +942,47 @@ app.get("/messages", requireLogin, async (req, res) => {
       ${lastText}
     </div>
   </div>
-</a>
-`;
-          })
-          .join("")
+</a>`;
+      })
+      .join("")
   }
-</div>
-`,
+
+  ${
+    matchedUsersWithoutConvo
+      .map(u => {
+        return `<a href="/chat/${u._id}" style="
+  display:flex;
+  align-items:center;
+  background:white;
+  color:#333;
+  padding:15px;
+  border-radius:22px;
+  margin-bottom:12px;
+  text-decoration:none;
+">
+  <img
+    src="${u.photo || "/default.png"}"
+    style="
+      width:55px;
+      height:55px;
+      border-radius:50%;
+      object-fit:cover;
+      margin-right:15px;
+    "
+  >
+
+  <div style="flex:1">
+    <strong>${u.name}</strong>
+    <div style="font-size:13px;color:#777;margin-top:4px;">
+      No messages yet
+    </div>
+  </div>
+</a>`;
+      })
+      .join("")
+  }
+
+</div>`,
       true
     )
   );
@@ -1476,6 +1627,30 @@ ${
 }
 
 </div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket = io();
+  socket.emit("register", "${u._id}");
+
+  socket.on("newNotification", (notif) => {
+    alert(notif.text); // optional popup
+    const wrapperEl = document.querySelector(".notif-wrapper");
+    if(wrapperEl){
+      const notifEl = document.createElement("a");
+      notifEl.href = notif.link || "#";
+      notifEl.style.textDecoration = "none";
+      notifEl.style.color = "black";
+      notifEl.innerHTML = \`
+        <div class="notif-card">
+          <p style="margin:0;font-weight:600">\${notif.text}</p>
+          <small>\${new Date(notif.date).toLocaleString()}</small>
+        </div>
+      \`;
+      wrapperEl.prepend(notifEl);
+    }
+  });
+</script>
 
 `, true));
 });
